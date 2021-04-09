@@ -409,7 +409,7 @@ status_t USART_SetBaudRate(USART_Type *base, uint32_t baudrate_Bps, uint32_t src
  * brief Enable 32 kHz mode which USART uses clock from the RTC oscillator as the clock source.
  *
  * Please note that in order to use a 32 kHz clock to operate USART properly, the RTC oscillator
- * and its 32 kHz output must be manully enabled by user, by calling RTC_Init and setting
+ * and its 32 kHz output must be manually enabled by user, by calling RTC_Init and setting
  * SYSCON_RTCOSCCTRL_EN bit to 1.
  * And in 32kHz clocking mode the USART can only work at 9600 baudrate or at the baudrate that
  * 9600 can evenly divide, eg: 4800, 3200.
