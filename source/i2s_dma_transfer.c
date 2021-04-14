@@ -12,8 +12,6 @@
  ******************************************************************************/
 
 
-// TODO implement check to make sure that the baud rates in the C program and in the python script
-// are equal
 
 #include "fsl_device_registers.h"
 #include "fsl_debug_console.h"
@@ -74,6 +72,9 @@
 #define PIO0_27_FUNC_ALT1 				(0x01U)
 #define PIO1_24_DIGIMODE_DIGITAL 		(0x01U)
 #define PIO1_24_FUNC_ALT1 				(0x01U)
+#define PLLOUT							(24576000U)
+#define SIGNAL_PLAY						(0xFDU)
+#define SIGNAL_STOP						(0xFCU)
 
 /*******************************************************************************
  * Variables
@@ -83,6 +84,7 @@
 typedef struct audio_characteristics {
 	wm8904_bit_width_t bit_depth;
 	wm8904_sample_rate_t sampling_frequency;
+	uint8_t num_channels;
 }audio_t;
 
 audio_t audio;
@@ -110,6 +112,8 @@ static bool rx_buf_full = false;
 static uint8_t g_UART_req_data[3] = {REQUEST_SIGNAL, (uint8_t)(((BUF_SIZE / BYTES_PER_SAMPLE) >> 8)&0xFF), (uint8_t)((BUF_SIZE / BYTES_PER_SAMPLE) & 0xFF)};
 static uint8_t g_UART_baud_check[4] = {REQUEST_SIGNAL, (uint8_t)((BAUDRATE >> 16)&0xFF), (uint8_t)((BAUDRATE >> 8)&0xFF) ,(uint8_t)((BAUDRATE) & 0xFF)};
 
+enum playback_state { PLAY, STOP };
+enum playback_state state = STOP;
 
 /*******************************************************************************
  * Prototypes
@@ -168,8 +172,8 @@ status_t set_baudrate(uint32_t baudrate)
 
 uint8_t get_i2s_div(audio_t * audio)
 {
-	PRINTF("i2s div: %d", (12000000U / (bit_depth_val * sampling_frequency_val)) - 1);
-	return (12000000U / (bit_depth_val * sampling_frequency_val)) - 1;
+	PRINTF("i2s div: %d", (PLLOUT / (bit_depth_val * sampling_frequency_val)) - 1);
+	return (PLLOUT / (bit_depth_val * sampling_frequency_val)) - 1;
 }
 
 
@@ -179,12 +183,11 @@ uint8_t get_i2s_div(audio_t * audio)
 void get_audio_characteristics(audio_t * audio)
 {
 
-
-
 	USART_WriteByte(USART, (uint8_t)0xFF);
 
 	USART_ReadBlocking(USART, &bit_depth_val, 1);
 	USART_ReadBlocking(USART, (uint8_t *)(&(sampling_frequency_val)), 4);
+	USART_ReadBlocking(USART, (uint8_t * )(&(audio->num_channels)), 1);
 
 	switch (bit_depth_val)
 	{
@@ -234,12 +237,20 @@ void get_audio_characteristics(audio_t * audio)
 	}
 
 	// TODO reject incompatible types
+	PRINTF("bit depth: %d\r\n", bit_depth_val);
+	PRINTF("sampling frequency: %d\r\n", sampling_frequency_val);
+	PRINTF("number of channels: %d\r\n", audio->num_channels);
 
 
 }
 
-
-
+/*
+ * Send the buffer size so that python script knows how many bytes to write
+ */
+void send_buffer_size(void)
+{
+	USART_WriteBlocking(USART, (uint8_t *)g_UART_req_data, UART_TX_SIZE);
+}
 
 /*
  * Make sure baud rates are the same in C and python components of app
@@ -269,6 +280,7 @@ static void refill_rx_buf()
 
 	rx_buf_ptr = rx_buf;
 
+	// send ready signal
 	USART_WriteBlocking(USART, (uint8_t *)g_UART_req_data, UART_TX_SIZE);
 
 	while(rx_buf_ptr < rx_buf + BUF_SIZE){
@@ -296,10 +308,35 @@ static void stream_tx_buf(void)
 }
 
 /*
+ * Get the current state from the python end of the app (pause or play)
+ */
+void receive_state(void)
+{
+	uint8_t state_val;
+	USART_ReadBlocking(USART, &state_val, 1 );
+
+	if (state_val == SIGNAL_PLAY){
+		state = PLAY;
+	}else if (state_val == SIGNAL_STOP){
+		state = STOP;
+	}
+
+}
+
+/*
  *
  */
 void I2S_TxCallback(I2S_Type *base, i2s_dma_handle_t *handle, status_t completionStatus, void *userData)
 {
+
+	// check state
+/*
+	receive_state();
+	if (state == STOP){
+		PRINTF("stop");
+		return;
+	}
+*/
 	swap_buffers();
 
 	rx_buf_full = false;
@@ -607,7 +644,7 @@ void setup(void)
 
 	init_CODEC();
 
-
+	send_buffer_size();
 
 }
 /*
@@ -725,32 +762,22 @@ int main(void) {
 
 
 
-/*
-	uint8_t buf[32] = {0};
-
-	for (uint8_t i = 0; i < 32; i++){
-
-		buf[i] = i;
-		PRINTF("buf[i] is: %d\r\n", buf[i]);
-	}
-
-	uint8_t * ptr = buf;
-
-
-	PRINTF("%d \r\n", *ptr);
-	ptr += 16;
-	PRINTF("%d \r\n", *ptr);
-
-*/
-
-
-
-
 	setup();
-    StartPlayback();
 
+	StartPlayback();
+
+	/*
     while (1)
     {
+    	if (state == STOP){
+    		//USART_WriteByte(USART, (uint8_t)0xFF);
+    		receive_state();
+    		if (state == PLAY){
+    			StartPlayback();
+    		}
+
+    	}
     }
+    */
 }
 
