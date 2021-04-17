@@ -24,8 +24,6 @@
 #include "fsl_wm8904.h"
 #include "fsl_codec_common.h"
 #include "fsl_usart.h"
-#include "music.h"
-#include "example_tones.h"
 #include <stdbool.h>
 #include "fsl_sysctl.h"
 #include "fsl_codec_adapter.h"
@@ -107,7 +105,7 @@ uint8_t g_data_buffer_B[BUF_SIZE];
 uint8_t * rx_buf 				= g_data_buffer_A; // pointer to the buffer we are reading data into
 uint8_t * tx_buf 				= g_data_buffer_B;
 uint8_t * rx_buf_ptr;
-static bool rx_buf_full = false;
+static bool rx_buf_full = false; // TODO is this necessary anymore?
 
 static uint8_t g_UART_req_data[3] = {REQUEST_SIGNAL, (uint8_t)(((BUF_SIZE / BYTES_PER_SAMPLE) >> 8)&0xFF), (uint8_t)((BUF_SIZE / BYTES_PER_SAMPLE) & 0xFF)};
 static uint8_t g_UART_baud_check[4] = {REQUEST_SIGNAL, (uint8_t)((BAUDRATE >> 16)&0xFF), (uint8_t)((BAUDRATE >> 8)&0xFF) ,(uint8_t)((BAUDRATE) & 0xFF)};
@@ -155,6 +153,7 @@ void init_CODEC(void);
 
 void init_UART(void);
 
+void receive_state(void);
 
 /*******************************************************************************
  * Code
@@ -186,6 +185,7 @@ void get_audio_characteristics(audio_t * audio)
 	USART_WriteByte(USART, (uint8_t)0xFF);
 
 	USART_ReadBlocking(USART, &bit_depth_val, 1);
+	PRINTF("%d\r\n", bit_depth_val);
 	USART_ReadBlocking(USART, (uint8_t *)(&(sampling_frequency_val)), 4);
 	USART_ReadBlocking(USART, (uint8_t * )(&(audio->num_channels)), 1);
 
@@ -278,18 +278,35 @@ static void refill_rx_buf()
 
 	NVIC_DisableIRQ(DMA0_IRQn);
 
+
+
 	rx_buf_ptr = rx_buf;
 
 	// send ready signal
 	USART_WriteBlocking(USART, (uint8_t *)g_UART_req_data, UART_TX_SIZE);
 
-	while(rx_buf_ptr < rx_buf + BUF_SIZE){
+
+	// get number of bytes incoming
+
+	receive_state();
+
+
+	if (state == STOP){
+		NVIC_EnableIRQ(DMA0_IRQn);
+		return;
+	}
+
+	// otherwise continue
+
+	while(rx_buf_ptr < rx_buf + BUF_SIZE){ // TODO will this get stuck if last transfer is < 4096? fudge
 
 		USART_ReadBlocking(USART, rx_buf_ptr, UART_TX_SIZE);
 		rx_buf_ptr += UART_TX_SIZE;
 	}
 
 	rx_buf_full = true;
+
+
 
 	NVIC_EnableIRQ(DMA0_IRQn);
 }
@@ -337,13 +354,17 @@ void I2S_TxCallback(I2S_Type *base, i2s_dma_handle_t *handle, status_t completio
 		return;
 	}
 */
-	swap_buffers();
+	if (state == PLAY){
 
-	rx_buf_full = false;
+		swap_buffers();
 
-	stream_tx_buf();
+		rx_buf_full = false;
 
-	refill_rx_buf();
+		stream_tx_buf();
+
+		refill_rx_buf();
+	}
+
 }
 
 /*
@@ -368,6 +389,8 @@ static void swap_buffers(void)
  */
 void StartPlayback(void)
 {
+	state = PLAY;
+
 	// fill both buffers
 	refill_rx_buf();
 	swap_buffers();
@@ -754,18 +777,68 @@ void BOARD_InitSysctrl(void)
  * Main
  **********************************************************************************************************************/
 
+/*
+ * Wait for a track to play
+ */
+void StartTrack(void)
+{
+
+
+	// wait for start signal
+
+	// get file specifics
+
+	// init codec
+
+	// play until stop signal
+
+	// deinit codec
+
+
+	PRINTF("inside startTrack");
+
+
+	uint8_t state_val;
+/*
+	// wait for start signal
+	while(1)
+	{
+		USART_ReadBlocking(USART, &state_val, 1 );
+		if (state_val == SIGNAL_PLAY){
+			break;
+		}
+	}
+*/
+
+
+	StartPlayback();
+
+	while (state == PLAY)
+	{
+
+	}
+}
+
+
+
 /*!
  * @brief Main function
  */
 int main(void) {
 
-
-
-
 	setup();
 
-	StartPlayback();
+	//StartPlayback();
 
+	//while(1){}
+
+
+	while(1)
+	{
+		StartTrack();
+	}
+
+	//StartPlayback();
 	/*
     while (1)
     {

@@ -33,25 +33,25 @@ endif
 # Add inputs and outputs from these tool invocations to the build variables 
 
 # All Target
-all: lpcxpresso55s69_i2s_dma_transfer.axf
+all: audio_player.axf
 
 # Tool invocations
-lpcxpresso55s69_i2s_dma_transfer.axf: $(OBJS) $(USER_OBJS)
+audio_player.axf: $(OBJS) $(USER_OBJS)
 	@echo 'Building target: $@'
 	@echo 'Invoking: MCU Linker'
-	arm-none-eabi-gcc -nostdlib -L"/Users/charles/Documents/MCUXpressoIDE_11.3.0/workspace/lpcxpresso55s69_i2s_dma_transfer/LPC55S69/mcuxpresso" -Xlinker -Map="lpcxpresso55s69_i2s_dma_transfer.map" -Xlinker --gc-sections -Xlinker -print-memory-usage -Xlinker --sort-section=alignment -Xlinker --cref -mcpu=cortex-m33 -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -T lpcxpresso55s69_i2s_dma_transfer_Debug.ld -o "lpcxpresso55s69_i2s_dma_transfer.axf" $(OBJS) $(USER_OBJS) $(LIBS)
+	arm-none-eabi-gcc -nostdlib -L"/Users/charles/Documents/MCUXpressoIDE_11.3.0/workspace/audio_player/LPC55S69/mcuxpresso" -Xlinker -Map="audio_player.map" -Xlinker --gc-sections -Xlinker -print-memory-usage -Xlinker --sort-section=alignment -Xlinker --cref -mcpu=cortex-m33 -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -T "audio_player_Debug.ld" -o "audio_player.axf" $(OBJS) $(USER_OBJS) $(LIBS)
 	@echo 'Finished building target: $@'
 	@echo ' '
 	$(MAKE) --no-print-directory post-build
 
 # Other Targets
 clean:
-	-$(RM) $(EXECUTABLES)$(OBJS)$(C_DEPS) lpcxpresso55s69_i2s_dma_transfer.axf
+	-$(RM) $(EXECUTABLES)$(OBJS)$(C_DEPS) audio_player.axf
 	-@echo ' '
 
 post-build:
 	-@echo 'Performing post-build steps'
-	-arm-none-eabi-size "lpcxpresso55s69_i2s_dma_transfer.axf"; # arm-none-eabi-objcopy -v -O binary "lpcxpresso55s69_i2s_dma_transfer.axf" "lpcxpresso55s69_i2s_dma_transfer.bin" ; # checksum -p LPC55S69 -d "lpcxpresso55s69_i2s_dma_transfer.bin";
+	-arm-none-eabi-size "audio_player.axf"; # arm-none-eabi-objcopy -v -O binary "audio_player.axf" "audio_player.bin" ; # checksum -p LPC55S69 -d "audio_player.bin";
 	-@echo ' '
 
 .PHONY: all clean dependents post-build
