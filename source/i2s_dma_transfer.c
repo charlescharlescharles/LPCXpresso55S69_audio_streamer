@@ -45,22 +45,23 @@
 #define I2S_RX_CHANNEL             		(16)
 #define I2S_TX_MODE                		(kI2S_MasterSlaveNormalMaster)
 #define AUDIO_PROTOCOL             		(kCODEC_BusI2S)
-#define VOLUME 							(50U)
+#define VOLUME 							(75U)
 #define SAMPLE_RATE						(kWM8904_SampleRate12kHz)
 #define BIT_WIDTH						(kWM8904_BitWidth16)
-#define BAUDRATE						(460800U)
+#define BAUDRATE						(921600U)
 #define I2C_MASTER_SLAVE_ADDR_7BIT 		(0x1AU)
 #define I2C_MASTER 						((I2C_Type *)I2C4_BASE)
 #define I2C_MASTER_CLOCK_FREQUENCY 		(12000000)
 #define I2C_DATA_LENGTH            		(2U)
 #define BYTES_PER_SAMPLE				(2U)
 #define I2S_CLOCK_DIVIDER				(85U)
+// TODO this is only good for the first playback, preprocessor only runs once
 #if (BYTES_PER_SAMPLE == 3)
 	#define BUF_SIZE					(4080U)
 #else
 	#define BUF_SIZE					(4096U)
 #endif
-#define UART_TX_SIZE					(16U)
+#define USART_FIFO_SIZE					(16U)
 #define USART                			(USART2)
 #define REQUEST_SIGNAL 					(0xFF)
 #define FAULT_SIGNAL					(0xFE)
@@ -108,10 +109,12 @@ uint8_t * rx_buf_ptr;
 static bool rx_buf_full = false; // TODO is this necessary anymore?
 
 static uint8_t g_UART_req_data[3] = {REQUEST_SIGNAL, (uint8_t)(((BUF_SIZE / BYTES_PER_SAMPLE) >> 8)&0xFF), (uint8_t)((BUF_SIZE / BYTES_PER_SAMPLE) & 0xFF)};
-static uint8_t g_UART_baud_check[4] = {REQUEST_SIGNAL, (uint8_t)((BAUDRATE >> 16)&0xFF), (uint8_t)((BAUDRATE >> 8)&0xFF) ,(uint8_t)((BAUDRATE) & 0xFF)};
+static uint8_t g_UART_baud_check[4] = {REQUEST_SIGNAL, (uint8_t)((BAUDRATE >> 16)&0xFF), (uint8_t)((BAUDRATE >> 8)&0xFF), (uint8_t)((BAUDRATE) & 0xFF)};
 
 enum playback_state { PLAY, STOP };
 enum playback_state state = STOP;
+
+usart_handle_t UART_handle;
 
 /*******************************************************************************
  * Prototypes
@@ -153,6 +156,10 @@ void init_CODEC(void);
 
 void init_UART(void);
 
+void init_DMA(void);
+
+void init_I2S(void);
+
 void receive_state(void);
 
 /*******************************************************************************
@@ -171,7 +178,7 @@ status_t set_baudrate(uint32_t baudrate)
 
 uint8_t get_i2s_div(audio_t * audio)
 {
-	PRINTF("i2s div: %d", (PLLOUT / (bit_depth_val * sampling_frequency_val)) - 1);
+	PRINTF("i2s div: %d\r\n", (PLLOUT / (bit_depth_val * sampling_frequency_val)) - 1);
 	return (PLLOUT / (bit_depth_val * sampling_frequency_val)) - 1;
 }
 
@@ -187,6 +194,8 @@ void get_audio_characteristics(audio_t * audio)
 	USART_ReadBlocking(USART, &bit_depth_val, 1);
 	PRINTF("%d\r\n", bit_depth_val);
 	USART_ReadBlocking(USART, (uint8_t *)(&(sampling_frequency_val)), 4);
+	PRINTF("%d\r\n", sampling_frequency_val);
+
 	USART_ReadBlocking(USART, (uint8_t * )(&(audio->num_channels)), 1);
 
 	switch (bit_depth_val)
@@ -199,9 +208,6 @@ void get_audio_characteristics(audio_t * audio)
 			break;
 		case ( 24U ) :
 			audio->bit_depth = kWM8904_BitWidth24;
-			break;
-		case ( 32U ) :
-			audio->bit_depth = kWM8904_BitWidth32;
 			break;
 		default :
 			PRINTF("Invalid bit depth: %d \r\n", bit_depth_val);
@@ -222,17 +228,23 @@ void get_audio_characteristics(audio_t * audio)
 		case ( 16000U ) :
 			audio->sampling_frequency = kWM8904_SampleRate16kHz;
 			break;
+		case ( 22050U ) :
+			audio->sampling_frequency = kWM8904_SampleRate24kHz;
+			break;
 		case ( 24000U ) :
 			audio->sampling_frequency = kWM8904_SampleRate24kHz;
 			break;
 		case ( 32000U ) :
 			audio->sampling_frequency = kWM8904_SampleRate32kHz;
 			break;
+		case ( 44100U ) :
+			audio->sampling_frequency = kWM8904_SampleRate48kHz;
+			break;
 		case ( 48000U ) :
 			audio->sampling_frequency = kWM8904_SampleRate48kHz;
 			break;
 		default :
-			PRINTF("Invalid samling frequency: %d \r\n", sampling_frequency_val);
+			PRINTF("Invalid sampling frequency: %d \r\n", sampling_frequency_val);
 			assert(0);
 	}
 
@@ -249,16 +261,20 @@ void get_audio_characteristics(audio_t * audio)
  */
 void send_buffer_size(void)
 {
-	USART_WriteBlocking(USART, (uint8_t *)g_UART_req_data, UART_TX_SIZE);
+	USART_WriteBlocking(USART, (uint8_t *)g_UART_req_data, USART_FIFO_SIZE);
 }
 
 /*
  * Make sure baud rates are the same in C and python components of app
+ * TODO change to "testing connection" & timeout if read/write doesn't happen
  */
 void baud_check(void)
 {
+
+	//`USART_WriteByte(USART, REQUEST_SIGNAL);
+
 	uint8_t buf[1] = {0};
-	USART_WriteBlocking(USART, (uint8_t *)g_UART_baud_check, UART_TX_SIZE);
+	USART_WriteBlocking(USART, (uint8_t *)g_UART_baud_check, USART_FIFO_SIZE);
 
 	USART_ReadBlocking(USART, buf, 1);
 
@@ -278,36 +294,45 @@ static void refill_rx_buf()
 
 	NVIC_DisableIRQ(DMA0_IRQn);
 
-
-
 	rx_buf_ptr = rx_buf;
 
 	// send ready signal
-	USART_WriteBlocking(USART, (uint8_t *)g_UART_req_data, UART_TX_SIZE);
+	USART_WriteByte(USART, (uint8_t)0xFF);
 
+	// get number of frames incoming
+	uint16_t num_incoming_frames;
+	USART_ReadBlocking(USART, (uint8_t *)&num_incoming_frames, 2);
 
-	// get number of bytes incoming
+	uint16_t num_incoming_bytes = num_incoming_frames * (bit_depth_val / 8);
 
-	receive_state();
-
-
-	if (state == STOP){
+	if (num_incoming_bytes == 0){
+		state = STOP;
 		NVIC_EnableIRQ(DMA0_IRQn);
 		return;
+	}else if(num_incoming_bytes > BUF_SIZE){
+		PRINTF("Tried to receive %d bytes. Max is %d \r\n", num_incoming_bytes, BUF_SIZE);
+		assert(0);
+	} // otherwise, state is still PLAY
+
+	uint16_t bytes_left = num_incoming_bytes;
+
+	// send ready signal
+	USART_WriteByte(USART, (uint8_t)0xFF);
+
+	while(rx_buf_ptr < rx_buf + num_incoming_bytes){
+
+		if ( bytes_left >= USART_FIFO_SIZE ) {
+			USART_ReadBlocking(USART, rx_buf_ptr, USART_FIFO_SIZE);
+			rx_buf_ptr += USART_FIFO_SIZE;
+			bytes_left -= USART_FIFO_SIZE;
+		}else{ // TODO ReadBlocking never returns for some reason
+			if (kUSART_RxFifoNotEmptyFlag & USART_GetStatusFlags(USART)){
+				PRINTF("Rx FIFO not empty \r\n");
+			}
+			USART_ReadBlocking(USART, rx_buf_ptr, bytes_left);
+		}
 	}
-
-	// otherwise continue
-
-	while(rx_buf_ptr < rx_buf + BUF_SIZE){ // TODO will this get stuck if last transfer is < 4096? fudge
-
-		USART_ReadBlocking(USART, rx_buf_ptr, UART_TX_SIZE);
-		rx_buf_ptr += UART_TX_SIZE;
-	}
-
 	rx_buf_full = true;
-
-
-
 	NVIC_EnableIRQ(DMA0_IRQn);
 }
 
@@ -316,7 +341,6 @@ static void refill_rx_buf()
  */
 static void stream_tx_buf(void)
 {
-
 	s_TxTransfer.data     = tx_buf;
     s_TxTransfer.dataSize = sizeof(g_data_buffer_A);
 
@@ -337,7 +361,6 @@ void receive_state(void)
 	}else if (state_val == SIGNAL_STOP){
 		state = STOP;
 	}
-
 }
 
 /*
@@ -345,15 +368,6 @@ void receive_state(void)
  */
 void I2S_TxCallback(I2S_Type *base, i2s_dma_handle_t *handle, status_t completionStatus, void *userData)
 {
-
-	// check state
-/*
-	receive_state();
-	if (state == STOP){
-		PRINTF("stop");
-		return;
-	}
-*/
 	if (state == PLAY){
 
 		swap_buffers();
@@ -399,10 +413,26 @@ void StartPlayback(void)
 	stream_tx_buf();
 }
 
+/*
+ *
+ */
+void StopPlayback(void)
+{
+	//deinit codec
+	if (CODEC_Deinit(&codecHandle) != kStatus_Success)
+	{
+		PRINTF("WM8904_Deinit failed!\r\n");
+		assert(false);
+	}
+}
+
 /***********************************************************************************************************************
  * I2C functions
  **********************************************************************************************************************/
 
+/*
+ *
+ */
 static int printRegValues(void){
 
 	i2c_master_config_t masterConfig;
@@ -456,7 +486,9 @@ static int printRegValues(void){
 	}
 }
 
-
+/*
+ *
+ */
 static int writeToReg(uint8_t regAddr, const void *txBuff){
 
 	i2c_master_config_t masterConfig;
@@ -497,97 +529,9 @@ static int writeToReg(uint8_t regAddr, const void *txBuff){
  * Setup functions
  **********************************************************************************************************************/
 
-void init_UART(void)
-{
-
-	// PINS
-	IOCON->PIO[0][27] = ((IOCON->PIO[0][27] &
-	                          /* Mask bits to zero which are setting */
-	                          (~(IOCON_PIO_FUNC_MASK | IOCON_PIO_DIGIMODE_MASK)))
-
-	                         /* Selects pin function.
-	                          * : PORT027 (pin 27) is configured as FC2_TXD_SCL_MISO_WS. */
-	                         | IOCON_PIO_FUNC(PIO0_27_FUNC_ALT1)
-
-	                         /* Select Digital mode.
-	                          * : Enable Digital mode.
-	                          * Digital input is enabled. */
-	                         | IOCON_PIO_DIGIMODE(PIO0_27_DIGIMODE_DIGITAL));
-
-	    const uint32_t port0_pin29_config = (/* Pin is configured as FC0_RXD_SDA_MOSI_DATA */
-	                                         IOCON_PIO_FUNC1 |
-	                                         /* No addition pin function */
-	                                         IOCON_PIO_MODE_INACT |
-	                                         /* Standard mode, output slew rate control is enabled */
-	                                         IOCON_PIO_SLEW_STANDARD |
-	                                         /* Input function is not inverted */
-	                                         IOCON_PIO_INV_DI |
-	                                         /* Enables digital function */
-	                                         IOCON_PIO_DIGITAL_EN |
-	                                         /* Open drain is disabled */
-	                                         IOCON_PIO_OPENDRAIN_DI);
-	    /* PORT0 PIN29 (coords: 92) is configured as FC0_RXD_SDA_MOSI_DATA */
-	    IOCON_PinMuxSet(IOCON, 0U, 29U, port0_pin29_config);
-
-	    const uint32_t port0_pin30_config = (/* Pin is configured as FC0_TXD_SCL_MISO_WS */
-	                                         IOCON_PIO_FUNC1 |
-	                                         /* No addition pin function */
-	                                         IOCON_PIO_MODE_INACT |
-	                                         /* Standard mode, output slew rate control is enabled */
-	                                         IOCON_PIO_SLEW_STANDARD |
-	                                         /* Input function is not inverted */
-	                                         IOCON_PIO_INV_DI |
-	                                         /* Enables digital function */
-	                                         IOCON_PIO_DIGITAL_EN |
-	                                         /* Open drain is disabled */
-	                                         IOCON_PIO_OPENDRAIN_DI);
-	    /* PORT0 PIN30 (coords: 94) is configured as FC0_TXD_SCL_MISO_WS */
-	    IOCON_PinMuxSet(IOCON, 0U, 30U, port0_pin30_config);
-
-	    IOCON->PIO[1][24] = ((IOCON->PIO[1][24] &
-	                          /* Mask bits to zero which are setting */
-	                          (~(IOCON_PIO_FUNC_MASK | IOCON_PIO_DIGIMODE_MASK)))
-
-	                         /* Selects pin function.
-	                          * : PORT124 (pin 3) is configured as FC2_RXD_SDA_MOSI_DATA. */
-	                         | IOCON_PIO_FUNC(PIO1_24_FUNC_ALT1)
-
-	                         /* Select Digital mode.
-	                          * : Enable Digital mode.
-	                          * Digital input is enabled. */
-	                         | IOCON_PIO_DIGIMODE(PIO1_24_DIGIMODE_DIGITAL));
-
-
-// CLOCKS
-
-	    CLOCK_AttachClk(kFRO12M_to_FLEXCOMM2);                 /*!< Switch FLEXCOMM2 to FRO12M */
-
-// PERIPHERALs
-
-
-	    const usart_config_t FLEXCOMM2_config = {
-	      .baudRate_Bps = BAUDRATE,
-	      .syncMode = kUSART_SyncModeDisabled,
-	      .parityMode = kUSART_ParityDisabled,
-	      .stopBitCount = kUSART_OneStopBit,
-	      .bitCountPerChar = kUSART_8BitsPerChar,
-	      .loopback = false,
-	      .txWatermark = kUSART_TxFifo0,
-	      .rxWatermark = kUSART_RxFifo1,
-	      .enableRx = true,
-	      .enableTx = true,
-	      .enableHardwareFlowControl = false,
-	      .enableMode32k = false,
-	      .clockPolarity = kUSART_RxSampleOnFallingEdge,
-	      .enableContinuousSCLK = false
-	    };
-
-	    RESET_PeripheralReset(kFC2_RST_SHIFT_RSTn);
-	    USART_Init(FLEXCOMM2_PERIPHERAL, &FLEXCOMM2_config, FLEXCOMM2_CLOCK_SOURCE);
-
-
-}
-
+/*
+ * init pins, clocks, and peripherals
+ */
 void setup(void)
 {
 // SETUP AND CLOCK STUFF
@@ -659,25 +603,112 @@ void setup(void)
 	BOARD_InitSysctrl();
 
 
+	// PINS
+	IOCON->PIO[0][27] = ((IOCON->PIO[0][27] &
+		                          /* Mask bits to zero which are setting */
+		                          (~(IOCON_PIO_FUNC_MASK | IOCON_PIO_DIGIMODE_MASK)))
 
-// INIT UART
+		                         /* Selects pin function.
+		                          * : PORT027 (pin 27) is configured as FC2_TXD_SCL_MISO_WS. */
+		                         | IOCON_PIO_FUNC(PIO0_27_FUNC_ALT1)
+
+		                         /* Select Digital mode.
+		                          * : Enable Digital mode.
+		                          * Digital input is enabled. */
+		                         | IOCON_PIO_DIGIMODE(PIO0_27_DIGIMODE_DIGITAL));
+
+	const uint32_t port0_pin29_config = (/* Pin is configured as FC0_RXD_SDA_MOSI_DATA */
+		                                         IOCON_PIO_FUNC1 |
+		                                         /* No addition pin function */
+		                                         IOCON_PIO_MODE_INACT |
+		                                         /* Standard mode, output slew rate control is enabled */
+		                                         IOCON_PIO_SLEW_STANDARD |
+		                                         /* Input function is not inverted */
+		                                         IOCON_PIO_INV_DI |
+		                                         /* Enables digital function */
+		                                         IOCON_PIO_DIGITAL_EN |
+		                                         /* Open drain is disabled */
+		                                         IOCON_PIO_OPENDRAIN_DI);
+	/* PORT0 PIN29 (coords: 92) is configured as FC0_RXD_SDA_MOSI_DATA */
+	IOCON_PinMuxSet(IOCON, 0U, 29U, port0_pin29_config);
+
+	const uint32_t port0_pin30_config = (/* Pin is configured as FC0_TXD_SCL_MISO_WS */
+		                                         IOCON_PIO_FUNC1 |
+		                                         /* No addition pin function */
+		                                         IOCON_PIO_MODE_INACT |
+		                                         /* Standard mode, output slew rate control is enabled */
+		                                         IOCON_PIO_SLEW_STANDARD |
+		                                         /* Input function is not inverted */
+		                                         IOCON_PIO_INV_DI |
+		                                         /* Enables digital function */
+		                                         IOCON_PIO_DIGITAL_EN |
+		                                         /* Open drain is disabled */
+		                                         IOCON_PIO_OPENDRAIN_DI);
+	/* PORT0 PIN30 (coords: 94) is configured as FC0_TXD_SCL_MISO_WS */
+	IOCON_PinMuxSet(IOCON, 0U, 30U, port0_pin30_config);
+
+	IOCON->PIO[1][24] = ((IOCON->PIO[1][24] &
+		                          /* Mask bits to zero which are setting */
+		                          (~(IOCON_PIO_FUNC_MASK | IOCON_PIO_DIGIMODE_MASK)))
+
+		                         /* Selects pin function.
+		                          * : PORT124 (pin 3) is configured as FC2_RXD_SDA_MOSI_DATA. */
+		                         | IOCON_PIO_FUNC(PIO1_24_FUNC_ALT1)
+
+		                         /* Select Digital mode.
+		                          * : Enable Digital mode.
+		                          * Digital input is enabled. */
+		                         | IOCON_PIO_DIGIMODE(PIO1_24_DIGIMODE_DIGITAL));
+
+	CLOCK_AttachClk(kFRO12M_to_FLEXCOMM2);                 /*!< Switch FLEXCOMM2 to FRO12M */
+
+
+
+
+	// call init functions
+
 	init_UART();
 
 	baud_check();
 
-	init_CODEC();
-
-	send_buffer_size();
+	init_DMA();
 
 }
+
+
+/*
+ * initialize UART peripheral
+ */
+void init_UART(void)
+{
+	    const usart_config_t FLEXCOMM2_config = {
+	      .baudRate_Bps = BAUDRATE,
+	      .syncMode = kUSART_SyncModeDisabled,
+	      .parityMode = kUSART_ParityDisabled,
+	      .stopBitCount = kUSART_OneStopBit,
+	      .bitCountPerChar = kUSART_8BitsPerChar,
+	      .loopback = false,
+	      .txWatermark = kUSART_TxFifo0,
+	      .rxWatermark = kUSART_RxFifo1,
+	      .enableRx = true,
+	      .enableTx = true,
+	      .enableHardwareFlowControl = false,
+	      .enableMode32k = false,
+	      .clockPolarity = kUSART_RxSampleOnFallingEdge,
+	      .enableContinuousSCLK = false
+	    };
+
+	    RESET_PeripheralReset(kFC2_RST_SHIFT_RSTn);
+	    USART_Init(FLEXCOMM2_PERIPHERAL, &FLEXCOMM2_config, FLEXCOMM2_CLOCK_SOURCE);
+}
+
+
+
 /*
  * Initialize the codec, as well as I2S and DMA for sending data to codec
  */
 void init_CODEC(void)
 {
-
-	get_audio_characteristics(&audio);
-
 	wm8904_config_t wm8904Config = {
 	    .i2cConfig    = {.codecI2CInstance = BOARD_CODEC_I2C_INSTANCE, .codecI2CSourceClock = BOARD_CODEC_I2C_CLOCK_FREQ},
 	    .recordSource = kWM8904_RecordSourceLineInput,
@@ -696,17 +727,12 @@ void init_CODEC(void)
 	// CONFIGURE THE CODEC
 
 	PRINTF("Configure WM8904 codec\r\n");
-
-	// TODO why is the bitwidth 16? Isn't the codec a 24-bit device?
-	/* protocol: i2s
-	 * sampleRate: 48K
-	 * bitwidth:16
-	 */
 	if (CODEC_Init(&codecHandle, &boardCodecConfig) != kStatus_Success)
 	{
 		PRINTF("WM8904_Init failed!\r\n");
 		assert(false);
 	}
+
 
 	/* Initial volume kept low for hearing safety.
 	 * Adjust it to your needs, 0-100, 0 for mute, 100 for maximum volume.
@@ -718,45 +744,39 @@ void init_CODEC(void)
 	}
 
 // CONFIGURE & INIT I2S
+	init_I2S();
 
+}
+
+void init_I2S(void)
+{
 	PRINTF("Configure I2S\r\n");
-
 
 	uint8_t i2s_clock_divider = get_i2s_div(&audio);
 
-
-
-	/*
-	 * masterSlave = kI2S_MasterSlaveNormalMaster;
-	 * mode = kI2S_ModeI2sClassic;
-	 * rightLow = false;
-	 * leftJust = false;
-	 * pdmData = false;
-	 * sckPol = false;
-	 * wsPol = false;
-	 * divider = 1;
-	 * oneChannel = false;
-	 * dataLength = 16;
-	 * frameLength = 32;
-	 * position = 0;
-	 * watermark = 4;
-	 * txEmptyZero = true;
-	 * pack48 = false;
-	 */
 	I2S_TxGetDefaultConfig(&s_TxConfig);
 	s_TxConfig.divider     = i2s_clock_divider;
 	s_TxConfig.masterSlave = I2S_TX_MODE;
+	s_TxConfig.dataLength  = bit_depth_val;
+
+	// TODO handle different number of channels
 
 	I2S_TxInit(I2S_TX, &s_TxConfig);
+}
 
-// INIT DMA
+/*
+ * initialize the DMA peripheral
+ */
+void init_DMA(void)
+{
+
+	PRINTF("Initialize DMA\r\n");
 
 	DMA_Init(DEMO_DMA);
 	DMA_EnableChannel(DEMO_DMA, DEMO_I2S_TX_CHANNEL);
-	DMA_SetChannelPriority(DEMO_DMA, DEMO_I2S_TX_CHANNEL, kDMA_ChannelPriority3); // TODO why priority 3?
+	DMA_SetChannelPriority(DEMO_DMA, DEMO_I2S_TX_CHANNEL, kDMA_ChannelPriority3);
 	DMA_CreateHandle(&s_DmaTxHandle, DEMO_DMA, DEMO_I2S_TX_CHANNEL);
 }
-
 
 void BOARD_InitSysctrl(void)
 {
@@ -782,24 +802,7 @@ void BOARD_InitSysctrl(void)
  */
 void StartTrack(void)
 {
-
-
-	// wait for start signal
-
-	// get file specifics
-
-	// init codec
-
-	// play until stop signal
-
-	// deinit codec
-
-
-	PRINTF("inside startTrack");
-
-
 	uint8_t state_val;
-/*
 	// wait for start signal
 	while(1)
 	{
@@ -808,15 +811,24 @@ void StartTrack(void)
 			break;
 		}
 	}
-*/
 
+	// get file specifics
+	get_audio_characteristics(&audio);
 
+	// init codec
+	init_CODEC();
+
+	// play until stop signal
+	PRINTF("Starting playback \r\n");
 	StartPlayback();
 
-	while (state == PLAY)
+ 	while (state == PLAY)
 	{
 
 	}
+
+	PRINTF("Stopping playback \r\n");
+	//StopPlayback();
 }
 
 
@@ -826,31 +838,12 @@ void StartTrack(void)
  */
 int main(void) {
 
+
 	setup();
-
-	//StartPlayback();
-
-	//while(1){}
-
 
 	while(1)
 	{
 		StartTrack();
 	}
-
-	//StartPlayback();
-	/*
-    while (1)
-    {
-    	if (state == STOP){
-    		//USART_WriteByte(USART, (uint8_t)0xFF);
-    		receive_state();
-    		if (state == PLAY){
-    			StartPlayback();
-    		}
-
-    	}
-    }
-    */
 }
 
